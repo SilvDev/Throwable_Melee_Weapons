@@ -1,6 +1,6 @@
 /*
 *	Throwable Melee Weapons
-*	Copyright (C) 2021 Silvers
+*	Copyright (C) 2022 Silvers
 *
 *	This program is free software: you can redistribute it and/or modify
 *	it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.18"
+#define PLUGIN_VERSION 		"1.19"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,9 @@
 
 ========================================================================================
 	Change Log:
+
+1.19 (06-Jan-2022)
+	- Added each weapon types damage flags for slash and club. Requested by "Shao".
 
 1.18 (01-Nov-2021)
 	- Added cvar "l4d2_throwable_view" to enable/disable the throw animation in first person view that causes screen tilt bug.
@@ -701,6 +704,8 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			CreateMelee(client);
 		}
 	}
+
+	return Plugin_Continue;
 }
 
 void CreateMelee(int client)
@@ -738,6 +743,8 @@ public Action TimerThrowMelee(Handle timer, any client)
 	{
 		CreateMeleeEntity(client);
 	}
+
+	return Plugin_Continue;
 }
 
 void CreateMeleeEntity(int client)
@@ -861,6 +868,8 @@ public Action TimerRender(Handle timer, any weapon)
 	{
 		SetEntityRenderColor(weapon, 255, 255, 255, 255);
 	}
+
+	return Plugin_Continue;
 }
 
 public Action TimerPos(Handle timer, any entity)
@@ -947,7 +956,7 @@ public void OnTouch(int weapon, int target)
 
 	if( damage )
 	{
-		HurtEntity(target, client, damage);
+		HurtEntity(target, client, type, damage);
 	}
 
 	// Sound
@@ -1023,7 +1032,20 @@ public Action TimerCheck(Handle timer, any weapon)
 	return Plugin_Stop;
 }
 
-void HurtEntity(int victim, int client, float damage)
+void HurtEntity(int victim, int client, int type, float damage)
 {
-	SDKHooks_TakeDamage(victim, client, client, damage, DMG_CLUB);
+	int dmg;
+	switch( type )
+	{
+		case WEAPON_CROWBAR:	dmg = DMG_SLASH;
+		case WEAPON_FIREAXE:	dmg = DMG_SLASH;
+		case WEAPON_KATANA:		dmg = DMG_SLASH;
+		case WEAPON_KNIFE:		dmg = DMG_SLASH;
+		case WEAPON_MACHETE:	dmg = DMG_SLASH;
+		case WEAPON_TONFA:		dmg = DMG_CLUB|DMG_SLASH;
+		case WEAPON_SHOVEL:		dmg = DMG_CLUB|DMG_SLASH;
+		default:				dmg = DMG_CLUB;
+	}
+
+	SDKHooks_TakeDamage(victim, client, client, damage, dmg);
 }
