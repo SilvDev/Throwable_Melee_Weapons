@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.19"
+#define PLUGIN_VERSION 		"1.20"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,11 @@
 
 ========================================================================================
 	Change Log:
+
+1.20 (16-Jun-2022)
+	- Added notifications and translations when equipping melee weapons or hitting Survivors or killing Special Infected. Requested by "Voevoda".
+	- Added cvar "l4d2_throwable_notify" to control notifications.
+	- Added Russian translations, thanks to "Voevoda" for providing.
 
 1.19 (06-Jan-2022)
 	- Added each weapon types damage flags for slash and club. Requested by "Shao".
@@ -146,10 +151,10 @@
 #define GAMEDATA			"l4d2_throwable_melee"
 
 
-ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarReturn, g_hCvarSpeed, g_hCvarSpeedMax, g_hCvarSpeedTime, g_hCvarSpin, g_hCvarView, g_hCvarTypes;
-int g_iCvarReturn, g_iCvarSpeed, g_iCvarSpeedMax, g_iCvarSpin, g_iCvarView, g_iCvarTypes;
+ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarNotify, g_hCvarReturn, g_hCvarSpeed, g_hCvarSpeedMax, g_hCvarSpeedTime, g_hCvarSpin, g_hCvarView, g_hCvarTypes;
+int g_iCvarNotify, g_iCvarReturn, g_iCvarSpeed, g_iCvarSpeedMax, g_iCvarSpin, g_iCvarView, g_iCvarTypes;
 float g_fCvarSpeedTime;
-bool g_bCvarAllow, g_bMapStarted, g_bLateLoad;
+bool g_bCvarAllow, g_bMapStarted, g_bLateLoad, g_bTranslation;
 
 float g_fDamageHits[10];
 float g_fDamageWeps[15];
@@ -158,11 +163,21 @@ float g_fLastPos[2048][3];
 // float g_fFlightTime[MAXPLAYERS+1];
 float g_fPlayerTime[MAXPLAYERS+1];
 float g_fThrowAnim[MAXPLAYERS+1];
+bool g_bNotified[MAXPLAYERS+1];
 int g_iHasWeapon[MAXPLAYERS+1];
 
 StringMap g_hMeleeTypes;
 Handle sdkAngularVelocity;
 bool g_bHasGamedata;
+
+enum
+{
+	NOTIFY_EQUIP		= (1<<0),
+	NOTIFY_SURVIVOR		= (1<<1),
+	NOTIFY_SPECIAL		= (1<<2),
+	NOTIFY_COMMON		= (1<<3),
+	NOTIFY_PRINTALL		= (1<<4)
+}
 
 enum
 {
@@ -353,6 +368,7 @@ public void OnPluginStart()
 	g_hCvarModes =		CreateConVar(	"l4d2_throwable_modes",			"",					"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
 	g_hCvarModesOff =	CreateConVar(	"l4d2_throwable_modes_off",		"",					"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
 	g_hCvarModesTog =	CreateConVar(	"l4d2_throwable_modes_tog",		"0",				"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
+	g_hCvarNotify =		CreateConVar(	"l4d2_throwable_notify",		"7",				"0=Off. 1=Notify of usage on first melee equip. 2=Notify on Survivor hit. 4=Notify on Special Infected Death. 8=Notify on Witch and Common Infected death. 16=Print to all, else print to client. Add numbers together.", CVAR_FLAGS);
 	g_hCvarReturn =		CreateConVar(	"l4d2_throwable_return",		"1",				"0=Off. 1=Changes the thrown melee weapon into a boomerang returning to the thrower when it hits something.", CVAR_FLAGS);
 	g_hCvarSpeed =		CreateConVar(	"l4d2_throwable_speed",			"500",				"Minimum speed. How fast to throw a melee weapon, affects range.", CVAR_FLAGS);
 	g_hCvarSpeedMax =	CreateConVar(	"l4d2_throwable_speed_max",		"1000",				"Maximum speed. How fast to throw a melee weapon, affects range.", CVAR_FLAGS);
@@ -369,6 +385,7 @@ public void OnPluginStart()
 	g_hCvarModesOff.AddChangeHook(ConVarChanged_Allow);
 	g_hCvarModesTog.AddChangeHook(ConVarChanged_Allow);
 	g_hCvarAllow.AddChangeHook(ConVarChanged_Allow);
+	g_hCvarNotify.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarReturn.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarSpeed.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarSpeedMax.AddChangeHook(ConVarChanged_Cvars);
@@ -382,6 +399,15 @@ public void OnPluginStart()
 	// ====================================================================================================
 	RegAdminCmd("sm_throwable_reload", CmdReload, ADMFLAG_ROOT, "Reloads the weapons damage data config.");
 
+	// Translations
+	BuildPath(Path_SM, sPath, PLATFORM_MAX_PATH, "translations/throwable_melee.phrases.txt");
+	if( FileExists(sPath) )
+	{
+		g_bTranslation = true;
+		LoadTranslations("throwable_melee.phrases");
+	}
+
+	// Data
 	LoadData();
 
 	g_hMeleeTypes = CreateTrie();
@@ -440,15 +466,29 @@ public void OnMapStart()
 public void OnMapEnd()
 {
 	g_bMapStarted = false;
+	ResetPlugin();
 }
 
-public Action CmdReload(int client, int args)
+public void OnClientPutInServer(int client)
+{
+	g_bNotified[client] = false;
+}
+
+void ResetPlugin()
+{
+	for( int i = 0; i <= MaxClients; i++ )
+	{
+		g_bNotified[i] = false;
+	}
+}
+
+Action CmdReload(int client, int args)
 {
 	LoadData();
 	return Plugin_Handled;
 }
 
-public void LoadData()
+void LoadData()
 {
 	char sPath[PLATFORM_MAX_PATH];
 	BuildPath(Path_SM, sPath, sizeof(sPath), CONFIG_DATA);
@@ -529,18 +569,19 @@ public void OnConfigsExecuted()
 	IsAllowed();
 }
 
-public void ConVarChanged_Allow(Handle convar, const char[] oldValue, const char[] newValue)
+void ConVarChanged_Allow(Handle convar, const char[] oldValue, const char[] newValue)
 {
 	IsAllowed();
 }
 
-public void ConVarChanged_Cvars(Handle convar, const char[] oldValue, const char[] newValue)
+void ConVarChanged_Cvars(Handle convar, const char[] oldValue, const char[] newValue)
 {
 	GetCvars();
 }
 
 void GetCvars()
 {
+	g_iCvarNotify = g_hCvarNotify.IntValue;
 	g_iCvarReturn = g_hCvarReturn.IntValue;
 	g_iCvarSpeed = g_hCvarSpeed.IntValue;
 	g_iCvarSpeedMax = g_hCvarSpeedMax.IntValue;
@@ -548,6 +589,11 @@ void GetCvars()
 	g_iCvarSpin = g_hCvarSpin.IntValue;
 	g_iCvarView = g_hCvarView.IntValue;
 	g_iCvarTypes = g_hCvarTypes.IntValue;
+
+	if( g_iCvarNotify && !g_bTranslation )
+	{
+		g_iCvarNotify = 0;
+	}
 }
 
 void IsAllowed()
@@ -558,6 +604,7 @@ void IsAllowed()
 
 	if( g_bCvarAllow == false && bCvarAllow == true && bAllowMode == true )
 	{
+		HookEvent("round_end", Event_RoundEnd);
 		HookEvent("player_spawn", Event_PlayerSpawn);
 		HookEvent("player_death", Event_PlayerDeath);
 		g_bCvarAllow = true;
@@ -565,6 +612,7 @@ void IsAllowed()
 
 	else if( g_bCvarAllow == true && (bCvarAllow == false || bAllowMode == false) )
 	{
+		UnhookEvent("round_end", Event_RoundEnd);
 		UnhookEvent("player_spawn", Event_PlayerSpawn);
 		UnhookEvent("player_death", Event_PlayerDeath);
 		g_bCvarAllow = false;
@@ -629,7 +677,7 @@ bool IsAllowedGameMode()
 	return true;
 }
 
-public void OnGamemode(const char[] output, int caller, int activator, float delay)
+void OnGamemode(const char[] output, int caller, int activator, float delay)
 {
 	if( strcmp(output, "OnCoop") == 0 )
 		g_iCurrentMode = 1;
@@ -646,7 +694,12 @@ public void OnGamemode(const char[] output, int caller, int activator, float del
 // ====================================================================================================
 //					EVENTS
 // ====================================================================================================
-public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
+{
+	ResetPlugin();
+}
+
+void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if( client && GetClientTeam(client) == 2 )
@@ -655,7 +708,7 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 	}
 }
 
-public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if( client )
@@ -664,7 +717,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 	}
 }
 
-public void WeaponSwitch(int client, int weapon)
+void WeaponSwitch(int client, int weapon)
 {
 	g_iHasWeapon[client] = 0;
 
@@ -678,12 +731,24 @@ public void WeaponSwitch(int client, int weapon)
 		{
 			g_iHasWeapon[client] = EntIndexToEntRef(weapon);
 			g_fThrowAnim[client] = 0.0;
+
+			// Hints
+			if( g_iCvarNotify & NOTIFY_EQUIP && !g_bNotified[client] )
+			{
+				g_bNotified[client] = true;
+				PrintToChat(client, CPrintFormat("%T", "Melee_Equip", client));
+			}
 		} else {
 			g_fPlayerTime[client] = 0.0;
 		}
 	}
 }
 
+
+
+// ====================================================================================================
+//					KEYBIND
+// ====================================================================================================
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3])
 {
 	if( g_bCvarAllow && g_iHasWeapon[client] && !IsFakeClient(client) && IsPlayerAlive(client) )
@@ -708,6 +773,11 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	return Plugin_Continue;
 }
 
+
+
+// ====================================================================================================
+//					CREATE MELEE
+// ====================================================================================================
 void CreateMelee(int client)
 {
 	// Timeout between checks
@@ -736,7 +806,7 @@ void CreateMelee(int client)
 	CreateTimer(0.2, TimerThrowMelee, GetClientUserId(client));
 }
 
-public Action TimerThrowMelee(Handle timer, any client)
+Action TimerThrowMelee(Handle timer, any client)
 {
 	client = GetClientOfUserId(client);
 	if( client && IsClientInGame(client) )
@@ -862,7 +932,7 @@ void CreateMeleeEntity(int client)
 	}
 }
 
-public Action TimerRender(Handle timer, any weapon)
+Action TimerRender(Handle timer, any weapon)
 {
 	if( EntRefToEntIndex(weapon) != INVALID_ENT_REFERENCE )
 	{
@@ -872,7 +942,7 @@ public Action TimerRender(Handle timer, any weapon)
 	return Plugin_Continue;
 }
 
-public Action TimerPos(Handle timer, any entity)
+Action TimerPos(Handle timer, any entity)
 {
 	entity = EntRefToEntIndex(entity);
 	if( entity != INVALID_ENT_REFERENCE )
@@ -892,7 +962,12 @@ public Action TimerPos(Handle timer, any entity)
 	return Plugin_Stop;
 }
 
-public void OnTouch(int weapon, int target)
+
+
+// ====================================================================================================
+//					MELEE HIT
+// ====================================================================================================
+void OnTouch(int weapon, int target)
 {
 	int client = GetEntPropEnt(weapon, Prop_Send, "m_hOwnerEntity");
 	if( client == -1 || client == target )
@@ -905,10 +980,14 @@ public void OnTouch(int weapon, int target)
 	SDKUnhook(weapon, SDKHook_Touch, OnTouch);
 
 	// Type
-	char script[16];
+	static char script[32];
 	GetEntPropString(weapon, Prop_Data, "m_strMapSetScriptName", script, sizeof(script));
 	int type;
-	if( g_hMeleeTypes.GetValue(script, type) == false ) type = WEAPON_GENERIC;
+	if( g_hMeleeTypes.GetValue(script, type) == false )
+	{
+		type = WEAPON_GENERIC;
+		script = "generic";
+	}
 
 	// Damage
 	float damage;
@@ -916,19 +995,69 @@ public void OnTouch(int weapon, int target)
 
 	if( target >= 1 && target <= MaxClients )
 	{
-		if( GetClientTeam(target) == 2 )
-		{
-			// Survivors
-			hit = true;
-			damage = g_fDamageHits[INDEX_SURVIVOR] ? float(GetEntProp(target, Prop_Data, "m_iMaxHealth")) / 100.0 * g_fDamageHits[INDEX_SURVIVOR] : g_fDamageWeps[type] * g_fDamageTarg[INDEX_SURVIVOR];
-		}
-		else
+		int team = GetClientTeam(target);
+		if( team == 3 )
 		{
 			// Special Infected
 			hit = true;
 			int index = GetEntProp(target, Prop_Send, "m_zombieClass") + 3;
 			if( index == 11 ) index = 3;
 			damage = g_fDamageHits[index] ? float(GetEntProp(target, Prop_Data, "m_iMaxHealth")) / 100.0 * g_fDamageHits[index] : g_fDamageWeps[type] * g_fDamageTarg[index];
+
+			// Notify
+			if( g_iCvarNotify & NOTIFY_SPECIAL )
+			{
+				if( damage && damage >= GetEntProp(target, Prop_Data, "m_iHealth") )
+				{
+					static char sTemp[256];
+					static char sName[MAX_NAME_LENGTH];
+					GetClientName(client, sName, sizeof(sName));
+					GetClientName(target, sTemp, sizeof(sTemp));
+
+					if( g_iCvarNotify & NOTIFY_PRINTALL )
+					{
+						for( int i = 1; i <= MaxClients; i++ )
+						{
+							if( IsClientInGame(i) )
+							{
+								PrintToChat(client, CPrintFormat("%T", "Melee_Hit_Special", client, sName, script, sTemp));
+							}
+						}
+					}
+					else
+						PrintToChat(client, CPrintFormat("%T", "Melee_Hit_Special", client, sName, script, sTemp));
+				}
+			}
+		}
+		else
+		{
+			// Survivors
+			hit = true;
+			damage = g_fDamageHits[INDEX_SURVIVOR] ? float(GetEntProp(target, Prop_Data, "m_iMaxHealth")) / 100.0 * g_fDamageHits[INDEX_SURVIVOR] : g_fDamageWeps[type] * g_fDamageTarg[INDEX_SURVIVOR];
+
+			// Notify
+			if( damage && g_iCvarNotify & NOTIFY_SURVIVOR )
+			{
+				static char sTemp[MAX_NAME_LENGTH];
+				static char sName[MAX_NAME_LENGTH];
+				GetClientName(client, sName, sizeof(sName));
+				GetClientName(target, sTemp, sizeof(sTemp));
+
+				if( g_iCvarNotify & NOTIFY_PRINTALL )
+				{
+					for( int i = 1; i <= MaxClients; i++ )
+					{
+						if( IsClientInGame(i) )
+						{
+							PrintToChat(client, CPrintFormat("%T", "Melee_Hit_Survivor", client, sName, script, sTemp));
+						}
+					}
+				}
+				else
+				{
+					PrintToChat(client, CPrintFormat("%T", "Melee_Hit_Survivor", client, sName, script, sTemp));
+				}
+			}
 		}
 	}
 	else if( target > MaxClients )
@@ -936,7 +1065,7 @@ public void OnTouch(int weapon, int target)
 		if( g_fDamageHits[INDEX_COMMON] || g_fDamageHits[INDEX_WITCH] || g_fDamageTarg[INDEX_COMMON] || g_fDamageTarg[INDEX_WITCH] )
 		{
 			// Classname
-			char class[10];
+			static char class[32];
 			GetEdictClassname(target, class, sizeof(class));
 
 			// Common Infected
@@ -950,6 +1079,30 @@ public void OnTouch(int weapon, int target)
 			{
 				hit = true;
 				damage = g_fDamageHits[INDEX_WITCH] ? float(GetEntProp(target, Prop_Data, "m_iMaxHealth")) / 100.0 * g_fDamageHits[INDEX_WITCH] : g_fDamageWeps[type] * g_fDamageTarg[INDEX_WITCH];
+			}
+
+			// Notify
+			if( hit && g_iCvarNotify & NOTIFY_COMMON && damage && damage >= GetEntProp(target, Prop_Data, "m_iHealth") )
+			{
+				static char sTemp[MAX_NAME_LENGTH];
+				GetClientName(client, sTemp, sizeof(sTemp));
+				Format(script, sizeof(script), "%T", script, client);
+				Format(class, sizeof(class), "%T", class, client);
+
+				if( g_iCvarNotify & NOTIFY_PRINTALL )
+				{
+					for( int i = 1; i <= MaxClients; i++ )
+					{
+						if( IsClientInGame(i) )
+						{
+							PrintToChat(client, CPrintFormat("%T", "Melee_Hit_Common", client, sTemp, script, class));
+						}
+					}
+				}
+				else
+				{
+					PrintToChat(client, CPrintFormat("%T", "Melee_Hit_Common", client, sTemp, script, class));
+				}
 			}
 		}
 	}
@@ -1003,7 +1156,7 @@ public void OnTouch(int weapon, int target)
 	}
 }
 
-public Action TimerCheck(Handle timer, any weapon)
+Action TimerCheck(Handle timer, any weapon)
 {
 	// Valid and still moving
 	weapon = EntRefToEntIndex(weapon);
@@ -1048,4 +1201,25 @@ void HurtEntity(int victim, int client, int type, float damage)
 	}
 
 	SDKHooks_TakeDamage(victim, client, client, damage, dmg);
+}
+
+
+
+// ====================================================================================================
+//					COLORS.INC REPLACEMENT
+// ====================================================================================================
+char[] CPrintFormat(char[] message, any ...)
+{
+	static char buffer[256];
+	VFormat(buffer, sizeof(buffer), message, 2);
+
+	ReplaceString(buffer, sizeof(buffer), "{DEFAULT}",		"\x01", false);
+	ReplaceString(buffer, sizeof(buffer), "{WHITE}",		"\x01", false);
+	ReplaceString(buffer, sizeof(buffer), "{CYAN}",			"\x03", false);
+	ReplaceString(buffer, sizeof(buffer), "{LIGHTGREEN}",	"\x03", false);
+	ReplaceString(buffer, sizeof(buffer), "{ORANGE}",		"\x04", false);
+	ReplaceString(buffer, sizeof(buffer), "{GREEN}",		"\x04", false); // Actually orange in L4D2, but replicating colors.inc behaviour
+	ReplaceString(buffer, sizeof(buffer), "{OLIVE}",		"\x05", false);
+
+	return buffer;
 }
