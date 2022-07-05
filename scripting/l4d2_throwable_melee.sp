@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.20"
+#define PLUGIN_VERSION 		"1.21"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,14 @@
 
 ========================================================================================
 	Change Log:
+
+1.21 (05-Jul-2022)
+	- Fixed melee weapons glowing when equipped by players. Thanks to "BystanderZK" for reporting.
+	- Fixed the "l4d2_throwable_types" cvar from following the wrong settings. Thanks to "moschinovac" for reporting.
+	- Glow now enables 1 second after throwing to show the melee weapon can be picked up.
+	- Thanks to "Marttt" for help testing and fixing.
+
+	- Plugin is now compiled with SourceMod 1.11.
 
 1.20 (16-Jun-2022)
 	- Added notifications and translations when equipping melee weapons or hitting Survivors or killing Special Infected. Requested by "Voevoda".
@@ -165,6 +173,8 @@ float g_fPlayerTime[MAXPLAYERS+1];
 float g_fThrowAnim[MAXPLAYERS+1];
 bool g_bNotified[MAXPLAYERS+1];
 int g_iHasWeapon[MAXPLAYERS+1];
+int g_iOwner[2048];
+int g_iMelee[2048];
 
 StringMap g_hMeleeTypes;
 Handle sdkAngularVelocity;
@@ -198,18 +208,18 @@ enum
 	WEAPON_BASEBALL = 0,
 	WEAPON_CRICKET,
 	WEAPON_CROWBAR,
+	WEAPON_FRYING,
 	WEAPON_GUITAR,
 	WEAPON_FIREAXE,
-	WEAPON_FRYING,
 	WEAPON_GOLFCLUB,
 	WEAPON_KATANA,
 	WEAPON_KNIFE,
 	WEAPON_MACHETE,
 	WEAPON_TONFA,
-	WEAPON_PITCHFORK,
-	WEAPON_SHOVEL,
 	WEAPON_SHIELD,
-	WEAPON_GENERIC
+	WEAPON_GENERIC,
+	WEAPON_PITCHFORK,
+	WEAPON_SHOVEL
 }
 
 // axe_break.wav // cool sound
@@ -344,7 +354,7 @@ public void OnPluginStart()
 	BuildPath(Path_SM, sPath, sizeof(sPath), "gamedata/%s.txt", GAMEDATA);
 	if( FileExists(sPath) )
 	{
-		Handle hGameData = LoadGameConfigFile(GAMEDATA);
+		GameData hGameData = new GameData(GAMEDATA);
 		if( hGameData == null ) SetFailState("Failed to load \"%s.txt\" gamedata.", GAMEDATA);
 
 		StartPrepSDKCall(SDKCall_Entity);
@@ -410,7 +420,7 @@ public void OnPluginStart()
 	// Data
 	LoadData();
 
-	g_hMeleeTypes = CreateTrie();
+	g_hMeleeTypes = new StringMap();
 	g_hMeleeTypes.SetValue("baseball_bat",		WEAPON_BASEBALL);
 	g_hMeleeTypes.SetValue("cricket_bat",		WEAPON_CRICKET);
 	g_hMeleeTypes.SetValue("crowbar",			WEAPON_CROWBAR);
@@ -429,19 +439,7 @@ public void OnPluginStart()
 
 	if( g_bLateLoad )
 	{
-		for( int i = 1; i <= MaxClients; i++ )
-		{
-			if( IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i) )
-			{
-				SDKHook(i, SDKHook_WeaponSwitchPost, WeaponSwitch);
-
-				int weapon = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
-				if( weapon > MaxClients && IsValidEntity(weapon) )
-				{
-					WeaponSwitch(i, weapon);
-				}
-			}
-		}
+		LateLoad();
 	}
 }
 
@@ -479,6 +477,11 @@ void ResetPlugin()
 	for( int i = 0; i <= MaxClients; i++ )
 	{
 		g_bNotified[i] = false;
+	}
+
+	for( int i = 0; i < 2048; i++ )
+	{
+		g_iMelee[i] = 0;
 	}
 }
 
@@ -559,6 +562,24 @@ void LoadData()
 	delete hFile;
 }
 
+void LateLoad()
+{
+	for( int i = 1; i <= MaxClients; i++ )
+	{
+		if( IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i) )
+		{
+			SDKHook(i, SDKHook_WeaponEquipPost, OnWeaponEquip);
+			SDKHook(i, SDKHook_WeaponSwitchPost, OnWeaponSwitch);
+
+			int weapon = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
+			if( weapon > MaxClients && IsValidEntity(weapon) )
+			{
+				OnWeaponSwitch(i, weapon);
+			}
+		}
+	}
+}
+
 
 
 // ====================================================================================================
@@ -608,6 +629,8 @@ void IsAllowed()
 		HookEvent("player_spawn", Event_PlayerSpawn);
 		HookEvent("player_death", Event_PlayerDeath);
 		g_bCvarAllow = true;
+
+		LateLoad();
 	}
 
 	else if( g_bCvarAllow == true && (bCvarAllow == false || bAllowMode == false) )
@@ -704,7 +727,8 @@ void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if( client && GetClientTeam(client) == 2 )
 	{
-		SDKHook(client, SDKHook_WeaponSwitchPost, WeaponSwitch);
+		SDKHook(client, SDKHook_WeaponEquipPost, OnWeaponEquip);
+		SDKHook(client, SDKHook_WeaponSwitchPost, OnWeaponSwitch);
 	}
 }
 
@@ -713,13 +737,26 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if( client )
 	{
-		SDKUnhook(client, SDKHook_WeaponSwitchPost, WeaponSwitch);
+		SDKUnhook(client, SDKHook_WeaponEquipPost, OnWeaponEquip);
+		SDKUnhook(client, SDKHook_WeaponSwitchPost, OnWeaponSwitch);
 	}
 }
 
-void WeaponSwitch(int client, int weapon)
+void OnWeaponEquip(int client, int weapon)
+{
+	weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if( weapon != -1 && g_iMelee[weapon] && g_iMelee[weapon] == EntIndexToEntRef(weapon) )
+	{
+		SetEntProp(weapon, Prop_Send, "m_iGlowType", 0);
+		SetEntProp(weapon, Prop_Data, "m_iGlowType", 0);
+		SetEntProp(weapon, Prop_Send, "m_glowColorOverride", 0);
+	}
+}
+
+void OnWeaponSwitch(int client, int weapon)
 {
 	g_iHasWeapon[client] = 0;
+	g_fPlayerTime[client] = 0.0;
 
 	weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 	if( weapon > MaxClients && IsValidEntity(weapon) && !IsFakeClient(client) )
@@ -738,8 +775,6 @@ void WeaponSwitch(int client, int weapon)
 				g_bNotified[client] = true;
 				PrintToChat(client, CPrintFormat("%T", "Melee_Equip", client));
 			}
-		} else {
-			g_fPlayerTime[client] = 0.0;
 		}
 	}
 }
@@ -788,7 +823,19 @@ void CreateMelee(int client)
 	int weapons;
 	for( int i = 0; i <= 5; i++ )
 		if( GetPlayerWeaponSlot(client, i) != -1 ) weapons++;
+
 	if( weapons == 1 ) return;
+
+	// Type restriction
+	int weapon = g_iHasWeapon[client];
+	if( weapon == 0 ) return;
+
+	static char script[16];
+	GetEntPropString(weapon, Prop_Data, "m_strMapSetScriptName", script, sizeof(script));
+
+	int type;
+	if( g_hMeleeTypes.GetValue(script, type) == false ) type = WEAPON_GENERIC;
+	if( g_iCvarTypes & (1<<type) == 0 ) return;
 
 	// Setting animation to pipebomb plays the throw animation, but resetting back to original makes both hands lift up and looks even better than lift/throw grenade animation!
 	if( g_iCvarView )
@@ -851,13 +898,8 @@ void CreateMeleeEntity(int client)
 	weapon = EntRefToEntIndex(weapon);
 	if( weapon <= 0 ) return;
 
-	GetEntPropString(weapon, Prop_Data, "m_strMapSetScriptName", script, sizeof(script));
-
-	int type;
-	if( g_hMeleeTypes.GetValue(script, type) == false ) type = WEAPON_GENERIC;
-	if( g_iCvarTypes & (1<<type) == 0 ) return;
-
 	// Remove
+	GetEntPropString(weapon, Prop_Data, "m_strMapSetScriptName", script, sizeof(script));
 	RemovePlayerItem(client, weapon);
 	RemoveEntity(weapon);
 
@@ -865,6 +907,8 @@ void CreateMeleeEntity(int client)
 	weapon = CreateEntityByName("weapon_melee"); // prop_physics* doesn't work
 	if( weapon != -1 )
 	{
+		g_iMelee[weapon] = EntIndexToEntRef(weapon);
+
 		// Vectors
 		float vPos[3], vAng[3], vDir[3];
 		GetClientEyeAngles(client, vAng);
@@ -873,7 +917,7 @@ void CreateMeleeEntity(int client)
 		DispatchKeyValue(weapon, "solid", "6");
 		DispatchKeyValue(weapon, "melee_script_name", script);
 		DispatchSpawn(weapon);
-		SetEntPropEnt(weapon, Prop_Send, "m_hOwnerEntity", client);
+		// SetEntPropEnt(weapon, Prop_Send, "m_hOwnerEntity", client);
 		GetAngleVectors(vAng, vDir, NULL_VECTOR, NULL_VECTOR);
 		NormalizeVector(vDir, vDir);
 
@@ -908,6 +952,7 @@ void CreateMeleeEntity(int client)
 		SetEntProp(weapon, Prop_Data, "m_iGlowType", 3);
 		SetEntProp(weapon, Prop_Send, "m_glowColorOverride", 1);
 
+		CreateTimer(1.0, TimerGlow, EntIndexToEntRef(weapon));
 		CreateTimer(0.1, TimerRender, EntIndexToEntRef(weapon));
 
 		// Spin
@@ -925,6 +970,7 @@ void CreateMeleeEntity(int client)
 		EmitSoundToAll(SOUND_THROW, weapon);
 
 		// Because we cannot get objects moving speed to determine when it's stationary
+		g_iOwner[weapon] = GetClientUserId(client);
 		g_fLastPos[weapon] = vPos;
 		CreateTimer(0.2, TimerPos, EntIndexToEntRef(weapon), TIMER_REPEAT);
 
@@ -936,7 +982,21 @@ Action TimerRender(Handle timer, any weapon)
 {
 	if( EntRefToEntIndex(weapon) != INVALID_ENT_REFERENCE )
 	{
+		// Hide weapon glow when throwing
 		SetEntityRenderColor(weapon, 255, 255, 255, 255);
+	}
+
+	return Plugin_Continue;
+}
+
+Action TimerGlow(Handle timer, any weapon)
+{
+	if( EntRefToEntIndex(weapon) != INVALID_ENT_REFERENCE )
+	{
+		// Enable normal glow to show weapon can be picked up
+		SetEntProp(weapon, Prop_Send, "m_iGlowType", 0);
+		SetEntProp(weapon, Prop_Data, "m_iGlowType", 0);
+		SetEntProp(weapon, Prop_Send, "m_glowColorOverride", 0);
 	}
 
 	return Plugin_Continue;
@@ -969,8 +1029,10 @@ Action TimerPos(Handle timer, any entity)
 // ====================================================================================================
 void OnTouch(int weapon, int target)
 {
-	int client = GetEntPropEnt(weapon, Prop_Send, "m_hOwnerEntity");
-	if( client == -1 || client == target )
+	int client = g_iOwner[weapon];
+	client = GetClientOfUserId(client);
+
+	if( !client || client == target || !IsClientInGame(client) )
 	{
 		return;
 	}
@@ -1138,7 +1200,7 @@ void OnTouch(int weapon, int target)
 	}
 
 	// Boomerang
-	if( g_iCvarReturn )
+	if( g_iCvarReturn && (target > 0 || g_iCvarReturn == 2) )
 	{
 		// Vectors
 		float vPos[3], vOrg[3], vDir[3];
@@ -1163,10 +1225,12 @@ Action TimerCheck(Handle timer, any weapon)
 	if( weapon != INVALID_ENT_REFERENCE && g_fLastPos[weapon][0] != 0.0 && g_fLastPos[weapon][1] != 0.0 && g_fLastPos[weapon][2] != 0.0 )
 	{
 		// Valid owner
-		int client = GetEntPropEnt(weapon, Prop_Send, "m_hOwnerEntity");
+		int client = g_iOwner[weapon];
+		client = GetClientOfUserId(client);
+		// int client = GetEntPropEnt(weapon, Prop_Send, "m_hOwnerEntity");
 		// if( IsClientInGame(client) && IsPlayerAlive(client) && GetGameTime() - g_fFlightTime[client] < 2.0 )
 
-		if( IsClientInGame(client) && IsPlayerAlive(client) && GetPlayerWeaponSlot(client, 1) == -1 )
+		if( client && IsClientInGame(client) && IsPlayerAlive(client) && GetPlayerWeaponSlot(client, 1) == -1 )
 		{
 			// Near object
 			float vPos[3], vDir[3];
